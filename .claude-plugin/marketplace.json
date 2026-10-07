@@ -1,0 +1,14 @@
+{
+  "name": "miox-team",
+  "description": "miox-team'in Claude Code eklentileri.",
+  "owner": {
+    "name": "miox-team",
+    "url": "https://github.com/miox-team"
+  },
+  "plugins": [
+    {
+      "name": "recap",
+      "source": "./"
+    }
+  ]
+}
