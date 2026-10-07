@@ -80,7 +80,7 @@ Claude cevabını bitirir
 recap eklentisi ── cevap uzunsa ──► Claude Sonnet: eylem + neden-sonuç, en çok 20 kelime
         │
         ▼ özet metni
-EMA ses sunucusu (127.0.0.1:29617)
+EMA ses sunucusu (~/.claude/recap/voice.sock)
   · kapalıysa eklenti başlatır
   · 15 dk boşta kalırsa kendini kapatır
         │ WAV
@@ -88,21 +88,24 @@ EMA ses sunucusu (127.0.0.1:29617)
 afplay ──► hoparlör
 ```
 
-Eklenti bir Claude Code hooks modülüdür (`hooks/register.tsx`). Ses sunucusu ayrı bir Python sürecidir (`tts/ema_server.py`). Eklenti sunucuyla yalnız yerel HTTP üzerinden konuşur.
+Eklenti bir Claude Code hooks modülüdür (`hooks/register.tsx`). Ses sunucusu ayrı bir Python sürecidir (`tts/ema_server.py`). Eklenti sunucuyla yalnız sizin erişebildiğiniz bir Unix soketi üzerinden konuşur; ağ portu açılmaz.
 
 ## Gizlilik ve güvenlik
 
 - **Özet:** Uzun bir cevabın metni özetlenmek için Claude'a gider. Bu, oturumun zaten konuştuğu yerdir ve sizin Claude Code hesabınızla yapılır. Uzun her cevap için düşük effort'lu bir Claude Sonnet çağrısı yapılır ve kullanım limitinizden düşer. 200 karakterden kısa cevaplar özetlenmeden doğrudan okunur.
-- **Ses:** Tamamen yereldir. Sunucu yalnız `127.0.0.1` adresini dinler ve internetsiz çalışır.
-- **Model dosyaları:** İlk kurulumda Hugging Face'ten bir kez iner. `ema-lightning` paketi bu dosyaları kod çalıştırabilen bir yöntemle (`torch.load(weights_only=False)`) açar. Bu yüzden recap yalnız incelenmiş sürümün SHA-256 özetleriyle birebir aynı dosyaları yükler. Dosya değişmişse yüklemeyi reddeder. Kurulum betiği dosyaları ayrıca güvenli modda (`weights_only=True`) açarak kod içermediklerini doğrular.
+- **Ses:** Tamamen yereldir ve internetsiz çalışır. Sunucu ağ portu açmaz; yalnız `~/.claude/recap/` klasöründeki bir Unix soketini dinler. Klasör yalnız sizin erişebileceğiniz izinle (`0700`) oluşturulur, bu yüzden başka kullanıcılar ve web sayfaları sunucuya ulaşamaz.
+- **Model dosyaları:** İlk kurulumda Hugging Face'ten bir kez iner. `ema-lightning` paketi bu dosyaları kod çalıştırabilen bir yöntemle (`torch.load(weights_only=False)`) açar. Bu yüzden recap dosyayı bir kez okur, SHA-256 özetini incelenmiş sürümle karşılaştırır ve modeli o aynı baytlardan yükler. Dosya değişmişse yüklemeyi reddeder. Kurulum betiği dosyaları ayrıca güvenli modda (`weights_only=True`) açarak kod içermediklerini doğrular.
 
-## Ayarlar
+## Dosyalar
 
-| Ayar | Varsayılan | Açıklama |
-|---|---|---|
-| `RECAP_TTS_PORT` | `29617` | Ses sunucusunun portu. 29617, IANA'da kayıtlı değildir; Linux ve macOS'un geçici port aralıklarının ve Kubernetes NodePort aralığının dışındadır. Yine de çakışırsa değiştirin. |
+| Yer | Ne |
+|---|---|
+| `~/.local/share/recap-ema/` | Ses modelinin Python ortamı |
+| `~/.claude/recap/voice.sock` | Ses sunucusunun soketi (yalnız sunucu çalışırken) |
+| `~/.claude/recap.json` | Tüm oturumlar için seçilen durum |
+| `$TMPDIR/recap-voice-server.log` | Ses sunucusunun günlüğü |
 
-Tüm oturumlar için seçilen durum `~/.claude/recap.json` dosyasında tutulur.
+Ağ portu kullanılmadığı için başka bir programla çakışma olmaz.
 
 ## Sorun giderme
 
@@ -111,13 +114,13 @@ Tüm oturumlar için seçilen durum `~/.claude/recap.json` dosyasında tutulur.
 | `Ses üretilemedi, sesli okunmadı.` | Sunucu başlatılamadı ya da hata verdi. `$TMPDIR/recap-voice-server.log` dosyasına bakın; çoğu zaman `python3 scripts/install_voice.py` yeniden çalıştırmak yeter. |
 | `Makine yoğun, sesli okunmadı.` | İşlemci yükü çekirdek başına 2'yi aşınca ses atlanır, özet yazılı kalır. |
 | Ne ses ne özet var | `/recap` ile durumu kontrol edin; oturum `mute` ya da `off` olabilir. |
-| `port ... is not free` (günlükte) | Port başka bir programda. `RECAP_TTS_PORT` ile başka bir port seçin. |
+| `refusing to load the model` (günlükte) | Önbellekteki model dosyası incelenen sürümle aynı değil. `python3 scripts/install_voice.py` ile yeniden kurun. |
 
 ## Kaldırma
 
 ```
 claude plugin uninstall recap
-rm -rf ~/.local/share/recap-ema ~/.claude/recap.json
+rm -rf ~/.local/share/recap-ema ~/.claude/recap ~/.claude/recap.json
 rm -rf ~/.cache/huggingface/hub/models--canberkkkkkk--ema-lightning
 ```
 

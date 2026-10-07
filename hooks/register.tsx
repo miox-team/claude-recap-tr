@@ -8,8 +8,7 @@ type Action = RecapMode | 'status'
 type Modes = { all: RecapMode; here: RecapMode }
 
 const SUMMARY_MODEL = 'claude-sonnet-5-5'
-const VOICE_HOST = '127.0.0.1'
-const DEFAULT_VOICE_PORT = '29617'
+const VOICE_SOCKET_UNDER_HOME = '.claude/recap/voice.sock'
 const VOICE_PYTHON_UNDER_HOME = '.local/share/recap-ema/bin/python'
 const VOICE_SERVER_UNDER_PLUGIN = 'tts/ema_server.py'
 const VOICE_TIMEOUT_SECONDS = 30
@@ -108,27 +107,30 @@ const silence = async ($: EngineInterface) => {
   await stopPlayer($)
 }
 
-const voicePort = async ($: EngineInterface) => (await $.env.get('RECAP_TTS_PORT')) ?? DEFAULT_VOICE_PORT
+const voiceSocket = async ($: EngineInterface) => `${await $.env.get('HOME')}/${VOICE_SOCKET_UNDER_HOME}`
 
-const voiceUrl = (port: string, endpoint: 'speak' | 'shutdown') =>
-  `http://${VOICE_HOST}:${port}/${endpoint}`
+const voiceRequest = (socket: string, endpoint: 'speak' | 'shutdown') => [
+  '--unix-socket',
+  socket,
+  `http://localhost/${endpoint}`,
+]
 
-const startVoiceServer = async ($: EngineInterface, port: string) =>
+const startVoiceServer = async ($: EngineInterface, socket: string) =>
   $.process.run([
     `${await $.env.get('HOME')}/${VOICE_PYTHON_UNDER_HOME}`,
     '-I',
     `${$.plugin.root}/${VOICE_SERVER_UNDER_PLUGIN}`,
-    '--port',
-    port,
+    '--socket',
+    socket,
     '--detach',
   ])
 
 const stopVoiceServer = async ($: EngineInterface) =>
-  $.process.run(['curl', '-sS', '-X', 'POST', '--max-time', '2', voiceUrl(await voicePort($), 'shutdown')])
+  $.process.run(['curl', '-sS', '-X', 'POST', '--max-time', '2', ...voiceRequest(await voiceSocket($), 'shutdown')])
 
 const fetchSpeech = (
   $: EngineInterface,
-  { text, port, path, waitForServer }: { text: string; port: string; path: string; waitForServer: boolean },
+  { text, socket, path, waitForServer }: { text: string; socket: string; path: string; waitForServer: boolean },
 ) => {
   const retry = waitForServer
     ? ['--retry', String(VOICE_START_RETRIES), '--retry-delay', '1', '--retry-connrefused']
@@ -148,7 +150,7 @@ const fetchSpeech = (
       '@-',
       '-o',
       path,
-      voiceUrl(port, 'speak'),
+      ...voiceRequest(socket, 'speak'),
     ],
     { stdin: JSON.stringify({ text }), timeoutMs: (VOICE_TIMEOUT_SECONDS + retrySeconds + 5) * 1000 },
   )
@@ -159,11 +161,11 @@ const recordWithLocalVoice = async ($: EngineInterface, text: string) => {
   const path = made.stdout.trim()
   if (made.exitCode !== 0 || path === '') return null
 
-  const port = await voicePort($)
-  let fetched = await fetchSpeech($, { text, port, path, waitForServer: false })
+  const socket = await voiceSocket($)
+  let fetched = await fetchSpeech($, { text, socket, path, waitForServer: false })
   if (fetched.exitCode === CURL_COULD_NOT_CONNECT) {
-    await startVoiceServer($, port)
-    fetched = await fetchSpeech($, { text, port, path, waitForServer: true })
+    await startVoiceServer($, socket)
+    fetched = await fetchSpeech($, { text, socket, path, waitForServer: true })
   }
   if (fetched.exitCode === 0) return path
 
@@ -269,7 +271,7 @@ const applyChoice = async ($: EngineInterface, scope: Scope, mode: RecapMode) =>
   if (effective !== 'on') await stop($)
   if (effective === 'off') await setNarration($, null)
   if (scope === 'all' && mode !== 'on') await stopVoiceServer($)
-  if (effective === 'on') await startVoiceServer($, await voicePort($))
+  if (effective === 'on') await startVoiceServer($, await voiceSocket($))
   await showModeStatus($)
 }
 

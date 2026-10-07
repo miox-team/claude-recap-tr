@@ -13,8 +13,9 @@ const SUMMARY = 'Dosyayı düzelttim.'
 const STATE_PATH = '/home/test/.claude/recap.json'
 const RECORDING_PATH = '/tmp/recap.test'
 const VOICE_PYTHON = '/home/test/.local/share/recap-ema/bin/python'
-const SPEAK_URL = 'http://127.0.0.1:29617/speak'
-const SHUTDOWN_URL = 'http://127.0.0.1:29617/shutdown'
+const VOICE_SOCKET = '/home/test/.claude/recap/voice.sock'
+const SPEAK_URL = 'http://localhost/speak'
+const SHUTDOWN_URL = 'http://localhost/shutdown'
 const CONNECTION_REFUSED = 7
 const HTTP_ERROR = 22
 
@@ -85,7 +86,8 @@ const commandsOf = (calls: Call[]) => calls.map(call => call.argv[0])
 
 const spawnsOf = (calls: Call[]) => calls.filter(call => call.argv[0] === VOICE_PYTHON)
 
-const shutdownsOf = (calls: Call[]) => calls.filter(call => call.argv.includes(SHUTDOWN_URL))
+const shutdownsOf = (calls: Call[]) =>
+  calls.filter(call => call.argv.includes(SHUTDOWN_URL) && call.argv.includes(VOICE_SOCKET))
 
 const callOf = (calls: Call[], command: string) => calls.find(call => call.argv[0] === command)
 
@@ -151,7 +153,7 @@ test('EMA sunucusu kapalıysa eklenti onu başlatır, bekler ve okur', async ($,
   const [spawn] = spawnsOf(calls)
   expect(spawn?.argv[1]).toBe('-I')
   expect(spawn?.argv[2]).toMatch(/\/tts\/ema_server\.py$/)
-  expect(spawn?.argv.slice(3)).toEqual(['--port', '29617', '--detach'])
+  expect(spawn?.argv.slice(3)).toEqual(['--socket', VOICE_SOCKET, '--detach'])
   const speakRequests = calls.filter(call => isSpeakRequest(call.argv))
   expect(speakRequests.length).toBe(2)
   expect(speakRequests[1]?.argv).toContain('--retry-connrefused')
@@ -189,17 +191,17 @@ test('sunucu hata verirse yeniden başlatılmaz', async ($, on) => {
   expect(await band.find({ type: 'Text', text: `Ses üretilemedi, sesli okunmadı. ${SUMMARY}` })).toBeDefined()
 })
 
-test('RECAP_TTS_PORT sunucunun portunu değiştirir', async ($, on) => {
+test('ses sunucusuna TCP portundan değil, kullanıcının kendi soketinden gidilir', async ($, on) => {
   const calls: Call[] = []
-  stubHost(on, new Map(), [], { HOME: '/home/test', RECAP_TTS_PORT: '31111' })
+  stubHost(on)
   stubSummary(on)
-  stubProcess(on, calls, { speakExitCodes: [CONNECTION_REFUSED, 0] })
+  stubProcess(on, calls)
 
   await finishTurn($)
 
-  expect(callOf(calls, 'curl')?.argv).toContain('http://127.0.0.1:31111/speak')
-  expect(spawnsOf(calls)[0]?.argv.slice(3)).toEqual(['--port', '31111', '--detach'])
-  expect(commandsOf(calls)).toContain('afplay')
+  const argv = callOf(calls, 'curl')?.argv ?? []
+  expect(argv[argv.indexOf('--unix-socket') + 1]).toBe(VOICE_SOCKET)
+  expect(argv.some(arg => arg.includes('127.0.0.1'))).toBe(false)
 })
 
 test('makine yoğunken özet yalnız ekranda kalır, ses çıkmaz', async ($, on) => {
