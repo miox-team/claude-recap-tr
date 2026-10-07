@@ -1,0 +1,20 @@
+name: voice
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  voice:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Install the voice
+        run: uv run --no-project --python 3.12 scripts/install_voice.py --no-sound
+      - name: Check the voice server end to end
+        run: uv run --no-project --python 3.12 scripts/check_voice_server.py --silent

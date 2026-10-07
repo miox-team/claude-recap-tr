@@ -6,20 +6,24 @@ import type { ModeChoice, Narration, NarrationPhase, RecapMode } from '../types'
 type Scope = 'all' | 'here'
 type Action = RecapMode | 'status'
 type Modes = { all: RecapMode; here: RecapMode }
+type VoicePath = 'speak' | 'stop' | 'shutdown'
+type VoiceEndpoint = { target: readonly string[]; base: string; proof?: string }
 
 const SUMMARY_MODEL = 'claude-sonnet-5-5'
-const VOICE_SOCKET_UNDER_HOME = '.claude/recap/voice.sock'
-const VOICE_PYTHON_UNDER_HOME = '.local/share/recap-ema/bin/python'
+const VOICE_DIR_UNDER_HOME = '.claude/recap'
+const VOICE_PYTHON_UNDER_HOME = {
+  posix: '.local/share/recap-ema/bin/python',
+  windows: '.local/share/recap-ema/Scripts/python.exe',
+}
 const VOICE_SERVER_UNDER_PLUGIN = 'tts/ema_server.py'
-const VOICE_TIMEOUT_SECONDS = 30
-const VOICE_START_RETRIES = 15
-const CURL_COULD_NOT_CONNECT = 7
-const BUSY_LOAD_PER_CORE = 2
+const SPEAK_TIMEOUT_SECONDS = 120
+const CONTROL_TIMEOUT_SECONDS = 5
+const CONNECT_TIMEOUT_SECONDS = 1
+const VOICE_ANSWERS: readonly string[] = ['200', '409', '503']
 const SPEAK_DIRECTLY_BELOW = 200
 const ANSWER_HEAD_CHARS = 2000
 const ANSWER_TAIL_CHARS = 4000
 const SUMMARY_TIMEOUT_MS = 30_000
-const SPEECH_TIMEOUT_MS = 120_000
 const STATE_FILE = '.claude/recap.json'
 const MODES: readonly RecapMode[] = ['on', 'mute', 'off']
 const MODE_MEANINGS: Record<RecapMode, string> = {
@@ -83,118 +87,97 @@ const phaseLabel = (n: Narration) => {
 
 const isTalking = (n: Narration) => n.phase === 'summarizing' || n.phase === 'speaking'
 
-const loadPerCore = (sysctlOutput: string) => {
-  const [loadLine = '', coresLine = ''] = sysctlOutput.trim().split('\n')
-  const oneMinuteLoad = Number.parseFloat(loadLine.replace(/[{}]/g, '').trim().split(/\s+/)[0] ?? '')
-  const cores = Number.parseInt(coresLine, 10)
-  return cores > 0 ? oneMinuteLoad / cores : Number.NaN
-}
-
-const isMachineBusy = async ($: EngineInterface) => {
-  const result = await $.process.run(['sysctl', '-n', 'vm.loadavg', 'hw.ncpu'])
-  return result.exitCode === 0 && loadPerCore(result.stdout) > BUSY_LOAD_PER_CORE
-}
-
 let generation = 0
 
 const setNarration = ($: EngineInterface, next: Narration | null) =>
   update($, narration, () => next)
 
-const stopPlayer = ($: EngineInterface) => $.process.run(['killall', 'afplay'])
+const isWindows = async ($: EngineInterface) => (await $.env.get('OS')) === 'Windows_NT'
+
+const homeDir = async ($: EngineInterface) =>
+  (await isWindows($)) ? await $.env.get('USERPROFILE') : await $.env.get('HOME')
+
+const voiceDir = async ($: EngineInterface) => `${await homeDir($)}/${VOICE_DIR_UNDER_HOME}`
+
+const readVoiceEndpoint = async ($: EngineInterface): Promise<VoiceEndpoint | null> => {
+  const dir = await voiceDir($)
+  if (!(await isWindows($))) return { target: ['--unix-socket', `${dir}/voice.sock`], base: 'http://localhost' }
+  const path = `${dir}/voice.json`
+  if (!(await $.fs.exists(path))) return null
+  try {
+    const { port, token, proof } = JSON.parse(String(await $.fs.read(path)))
+    return { target: ['-H', `X-Recap-Token: ${token}`], base: `http://127.0.0.1:${port}`, proof }
+  } catch {
+    return null
+  }
+}
+
+const askVoice = async ($: EngineInterface, endpoint: VoiceEndpoint, path: VoicePath, body?: string) => {
+  const timeoutSeconds = path === 'speak' ? SPEAK_TIMEOUT_SECONDS : CONTROL_TIMEOUT_SECONDS
+  const json = body === undefined ? [] : ['-H', 'Content-Type: application/json', '--data-binary', '@-']
+  const result = await $.process.run(
+    [
+      'curl',
+      '-s',
+      '--connect-timeout',
+      String(CONNECT_TIMEOUT_SECONDS),
+      '--max-time',
+      String(timeoutSeconds),
+      '-w',
+      '\n%{http_code}',
+      '-X',
+      'POST',
+      ...json,
+      ...endpoint.target,
+      `${endpoint.base}/${path}`,
+    ],
+    { stdin: body, timeoutMs: (timeoutSeconds + 5) * 1000 },
+  )
+  const cut = result.stdout.lastIndexOf('\n')
+  const proof = result.stdout.slice(0, Math.max(cut, 0))
+  const code = result.stdout.slice(cut + 1).trim()
+  const isRecap = VOICE_ANSWERS.includes(code) && (endpoint.proof === undefined || proof === endpoint.proof)
+  return isRecap ? code : null
+}
+
+const tellVoice = async ($: EngineInterface, path: Exclude<VoicePath, 'speak'>) => {
+  const endpoint = await readVoiceEndpoint($)
+  if (endpoint !== null) await askVoice($, endpoint, path)
+}
+
+const startVoiceServer = async ($: EngineInterface) => {
+  const python = (await isWindows($)) ? VOICE_PYTHON_UNDER_HOME.windows : VOICE_PYTHON_UNDER_HOME.posix
+  return $.process.run([
+    `${await homeDir($)}/${python}`,
+    '-I',
+    `${$.plugin.root}/${VOICE_SERVER_UNDER_PLUGIN}`,
+    '--dir',
+    await voiceDir($),
+    '--detach',
+  ])
+}
+
+const speakAloud = async ($: EngineInterface, text: string): Promise<NarrationPhase> => {
+  const body = JSON.stringify({ text })
+  const ask = async () => {
+    const endpoint = await readVoiceEndpoint($)
+    return endpoint === null ? null : askVoice($, endpoint, 'speak', body)
+  }
+  let answer = await ask()
+  if (answer === null) {
+    await startVoiceServer($)
+    answer = await ask()
+  }
+  if (answer === '503') return 'busy'
+  return answer === null ? 'noVoice' : 'done'
+}
 
 const silence = async ($: EngineInterface) => {
   generation += 1
-  await stopPlayer($)
+  if ((await read($, narration))?.phase === 'speaking') await tellVoice($, 'stop')
 }
 
-const voiceSocket = async ($: EngineInterface) => `${await $.env.get('HOME')}/${VOICE_SOCKET_UNDER_HOME}`
-
-const voiceRequest = (socket: string, endpoint: 'speak' | 'shutdown') => [
-  '--unix-socket',
-  socket,
-  `http://localhost/${endpoint}`,
-]
-
-const startVoiceServer = async ($: EngineInterface, socket: string) =>
-  $.process.run([
-    `${await $.env.get('HOME')}/${VOICE_PYTHON_UNDER_HOME}`,
-    '-I',
-    `${$.plugin.root}/${VOICE_SERVER_UNDER_PLUGIN}`,
-    '--socket',
-    socket,
-    '--detach',
-  ])
-
-const stopVoiceServer = async ($: EngineInterface) =>
-  $.process.run(['curl', '-sS', '-X', 'POST', '--max-time', '2', ...voiceRequest(await voiceSocket($), 'shutdown')])
-
-const fetchSpeech = (
-  $: EngineInterface,
-  { text, socket, path, waitForServer }: { text: string; socket: string; path: string; waitForServer: boolean },
-) => {
-  const retry = waitForServer
-    ? ['--retry', String(VOICE_START_RETRIES), '--retry-delay', '1', '--retry-connrefused']
-    : []
-  const retrySeconds = waitForServer ? VOICE_START_RETRIES : 0
-  return $.process.run(
-    [
-      'curl',
-      '-sS',
-      '--fail',
-      '--max-time',
-      String(VOICE_TIMEOUT_SECONDS),
-      ...retry,
-      '-H',
-      'Content-Type: application/json',
-      '--data-binary',
-      '@-',
-      '-o',
-      path,
-      ...voiceRequest(socket, 'speak'),
-    ],
-    { stdin: JSON.stringify({ text }), timeoutMs: (VOICE_TIMEOUT_SECONDS + retrySeconds + 5) * 1000 },
-  )
-}
-
-const recordWithLocalVoice = async ($: EngineInterface, text: string) => {
-  const made = await $.process.run(['mktemp', '-t', 'recap'])
-  const path = made.stdout.trim()
-  if (made.exitCode !== 0 || path === '') return null
-
-  const socket = await voiceSocket($)
-  let fetched = await fetchSpeech($, { text, socket, path, waitForServer: false })
-  if (fetched.exitCode === CURL_COULD_NOT_CONNECT) {
-    await startVoiceServer($, socket)
-    fetched = await fetchSpeech($, { text, socket, path, waitForServer: true })
-  }
-  if (fetched.exitCode === 0) return path
-
-  await $.process.run(['rm', '-f', path])
-  return null
-}
-
-const playRecording = ($: EngineInterface, path: string) =>
-  $.process.run(['afplay', path], { timeoutMs: SPEECH_TIMEOUT_MS })
-
-const speak = async (
-  $: EngineInterface,
-  text: string,
-  isCurrent: () => boolean,
-): Promise<NarrationPhase> => {
-  const recording = await recordWithLocalVoice($, text)
-  if (recording === null) return 'noVoice'
-  try {
-    if (isCurrent()) {
-      await stopPlayer($)
-      await playRecording($, recording)
-    }
-    return 'done'
-  } finally {
-    await $.process.run(['rm', '-f', recording])
-  }
-}
-
-const stateFilePath = async ($: EngineInterface) => `${await $.env.get('HOME')}/${STATE_FILE}`
+const stateFilePath = async ($: EngineInterface) => `${await homeDir($)}/${STATE_FILE}`
 
 const isMode = (value: unknown): value is RecapMode => MODES.includes(value as RecapMode)
 
@@ -270,8 +253,8 @@ const applyChoice = async ($: EngineInterface, scope: Scope, mode: RecapMode) =>
   const effective = await currentMode($)
   if (effective !== 'on') await stop($)
   if (effective === 'off') await setNarration($, null)
-  if (scope === 'all' && mode !== 'on') await stopVoiceServer($)
-  if (effective === 'on') await startVoiceServer($, await voiceSocket($))
+  if (scope === 'all' && mode !== 'on') await tellVoice($, 'shutdown')
+  if (effective === 'on') await startVoiceServer($)
   await showModeStatus($)
 }
 
@@ -305,15 +288,10 @@ const narrate = async ($: EngineInterface, answer: string, withVoice: boolean) =
   if (text === null) return
   if (!withVoice) return setNarration($, { text, phase: 'done' })
 
-  if (await isMachineBusy($)) {
-    if (isCurrent()) await setNarration($, { text, phase: 'busy' })
-    return
-  }
-
   await setNarration($, { text, phase: 'speaking' })
   let phase: NarrationPhase = 'done'
   try {
-    phase = await speak($, text, isCurrent)
+    phase = await speakAloud($, text)
   } finally {
     if (isCurrent()) await setNarration($, { text, phase })
   }

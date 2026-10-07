@@ -10,18 +10,22 @@ const turn = {
 
 const LONG_ANSWER = 'Dosyayı düzelttim ve testleri çalıştırdım. '.repeat(10)
 const SUMMARY = 'Dosyayı düzelttim.'
-const STATE_PATH = '/home/test/.claude/recap.json'
-const RECORDING_PATH = '/tmp/recap.test'
-const VOICE_PYTHON = '/home/test/.local/share/recap-ema/bin/python'
-const VOICE_SOCKET = '/home/test/.claude/recap/voice.sock'
-const SPEAK_URL = 'http://localhost/speak'
-const SHUTDOWN_URL = 'http://localhost/shutdown'
-const CONNECTION_REFUSED = 7
-const HTTP_ERROR = 22
+const PROOF = 'kanit'
+
+const MAC_ENV = { HOME: '/home/test' }
+const MAC_STATE_PATH = '/home/test/.claude/recap.json'
+const MAC_VOICE_DIR = '/home/test/.claude/recap'
+const MAC_SOCKET = '/home/test/.claude/recap/voice.sock'
+const MAC_PYTHON = '/home/test/.local/share/recap-ema/bin/python'
+
+const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: '/win/Users/test', HOME: '/shared/home' }
+const WIN_STATE_PATH = '/win/Users/test/.claude/recap.json'
+const WIN_VOICE_DIR = '/win/Users/test/.claude/recap'
+const WIN_ENDPOINT_PATH = '/win/Users/test/.claude/recap/voice.json'
+const WIN_PYTHON = '/win/Users/test/.local/share/recap-ema/Scripts/python.exe'
+const WIN_ENDPOINT = JSON.stringify({ port: 51234, token: 'jeton', proof: PROOF, pid: 42 })
 
 type Call = { argv: readonly string[]; stdin?: string }
-
-const isSpeakRequest = (argv: readonly string[]) => argv.some(arg => arg.endsWith('/speak'))
 
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -30,9 +34,11 @@ const finished = (stdout = '', exitCode = 0) =>
 
 const stubHost = (
   on: On,
-  files: Map<string, string> = new Map(),
-  statuses: unknown[] = [],
-  env: Record<string, string> = { HOME: '/home/test' },
+  {
+    files = new Map<string, string>(),
+    statuses = [] as unknown[],
+    env = MAC_ENV as Record<string, string>,
+  } = {},
 ) => {
   on('env.get', (_$, e) => ({ value: env[e.name] }) as never)
   on('fs.exists', (_$, e) => ({ value: files.has(e.path) }) as never)
@@ -53,43 +59,48 @@ const stubSummary = (on: On) => {
   on('model.complete', () => ({ value: { isAnswered: true, text: SUMMARY } }) as never)
 }
 
-const BUSY_LOAD_REPORT = '{ 217.48 159.12 129.90 }\n18'
-const CALM_LOAD_REPORT = '{ 9.00 8.00 7.00 }\n18'
+const endpointOf = (argv: readonly string[]) => argv.at(-1)?.split('/').at(-1)
+
+const answer = (code: string, proof = PROOF) =>
+  code === '000' ? finished('\n000', 7) : finished(`${proof}\n${code}`)
 
 const stubProcess = (
   on: On,
   calls: Call[],
   {
-    curlExitCode = 0,
-    speakExitCodes = [] as number[],
-    slowCommand = '',
-    slowMs = 0,
-    loadReport = '',
+    speakAnswers = [] as string[],
+    speakDefault = '200',
+    proof = PROOF,
+    slowSpeakMs = 0,
+    onSpawn = () => {},
   } = {},
 ) =>
   on('process.run', async (_$, e) => {
-    const [command] = e.argv
+    const [command = ''] = e.argv
     calls.push({ argv: e.argv, stdin: e.init?.stdin })
-    if (command === slowCommand) await pause(slowMs)
-    if (command === 'sysctl') return finished(loadReport)
-    if (command === 'mktemp') return finished(`${RECORDING_PATH}\n`)
-    if (command === 'curl' && isSpeakRequest(e.argv)) return finished('', speakExitCodes.shift() ?? curlExitCode)
+    if (command === 'curl' && endpointOf(e.argv) === 'speak') {
+      await pause(slowSpeakMs)
+      return answer(speakAnswers.shift() ?? speakDefault, proof)
+    }
+    if (command === 'curl') return answer('200', proof)
+    if (command.endsWith('python') || command.endsWith('python.exe')) onSpawn()
     return finished()
   })
 
-const finishTurn = async ($: Engine, answer = LONG_ANSWER) => {
-  await $.turn.complete({ ...turn, answer, reason: 'answer' })
+const finishTurn = async ($: Engine, answerText = LONG_ANSWER) => {
+  await $.turn.complete({ ...turn, answer: answerText, reason: 'answer' })
   await pause(60)
 }
 
 const commandsOf = (calls: Call[]) => calls.map(call => call.argv[0])
 
-const spawnsOf = (calls: Call[]) => calls.filter(call => call.argv[0] === VOICE_PYTHON)
+const requestsTo = (calls: Call[], endpoint: string) =>
+  calls.filter(call => call.argv[0] === 'curl' && endpointOf(call.argv) === endpoint)
 
-const shutdownsOf = (calls: Call[]) =>
-  calls.filter(call => call.argv.includes(SHUTDOWN_URL) && call.argv.includes(VOICE_SOCKET))
+const spawnsOf = (calls: Call[]) =>
+  calls.filter(call => call.argv[0] === MAC_PYTHON || call.argv[0] === WIN_PYTHON)
 
-const callOf = (calls: Call[], command: string) => calls.find(call => call.argv[0] === command)
+const valueAfter = (argv: readonly string[], flag: string) => argv[argv.indexOf(flag) + 1]
 
 const bandProps = {
   hasSurvey: false,
@@ -107,7 +118,7 @@ const mountBand = ($: Engine) =>
     props: bandProps,
   })
 
-test('uzun cevap özetlenir ve EMA sesiyle okunur', async ($, on) => {
+test('uzun cevap özetlenir ve sunucuya okutulur; eklenti ses dosyası ya da oynatıcı çalıştırmaz', async ($, on) => {
   const calls: Call[] = []
   stubHost(on)
   stubSummary(on)
@@ -115,13 +126,12 @@ test('uzun cevap özetlenir ve EMA sesiyle okunur', async ($, on) => {
 
   await finishTurn($)
 
-  const request = callOf(calls, 'curl')
-  expect(JSON.parse(request?.stdin ?? '{}')).toEqual({ text: SUMMARY })
-  expect(request?.argv).toContain(SPEAK_URL)
+  const [speak] = requestsTo(calls, 'speak')
+  expect(JSON.parse(speak?.stdin ?? '{}')).toEqual({ text: SUMMARY })
+  expect(valueAfter(speak?.argv ?? [], '--unix-socket')).toBe(MAC_SOCKET)
+  expect(speak?.argv.at(-1)).toBe('http://localhost/speak')
+  expect(commandsOf(calls)).toEqual(['curl'])
   expect(spawnsOf(calls)).toEqual([])
-  expect(callOf(calls, 'afplay')?.argv).toEqual(['afplay', RECORDING_PATH])
-  expect(commandsOf(calls)).not.toContain('say')
-  expect(calls.at(-1)?.argv).toEqual(['rm', '-f', RECORDING_PATH])
 })
 
 test('kısa cevap özetlenmeden doğrudan okunur', async ($, on) => {
@@ -138,106 +148,64 @@ test('kısa cevap özetlenmeden doğrudan okunur', async ($, on) => {
   await finishTurn($, 'Tamam, **bitti**.')
 
   expect(summarized).toBe(false)
-  expect(JSON.parse(callOf(calls, 'curl')?.stdin ?? '{}')).toEqual({ text: 'Tamam, bitti.' })
-  expect(commandsOf(calls)).toContain('afplay')
+  expect(JSON.parse(requestsTo(calls, 'speak')[0]?.stdin ?? '{}')).toEqual({ text: 'Tamam, bitti.' })
 })
 
-test('EMA sunucusu kapalıysa eklenti onu başlatır, bekler ve okur', async ($, on) => {
+test('ses sunucusu kapalıysa eklenti onu başlatır ve bir kez daha dener', async ($, on) => {
   const calls: Call[] = []
   stubHost(on)
   stubSummary(on)
-  stubProcess(on, calls, { speakExitCodes: [CONNECTION_REFUSED, 0] })
+  stubProcess(on, calls, { speakAnswers: ['000', '200'] })
 
   await finishTurn($)
 
   const [spawn] = spawnsOf(calls)
   expect(spawn?.argv[1]).toBe('-I')
   expect(spawn?.argv[2]).toMatch(/\/tts\/ema_server\.py$/)
-  expect(spawn?.argv.slice(3)).toEqual(['--socket', VOICE_SOCKET, '--detach'])
-  const speakRequests = calls.filter(call => isSpeakRequest(call.argv))
-  expect(speakRequests.length).toBe(2)
-  expect(speakRequests[1]?.argv).toContain('--retry-connrefused')
-  expect(callOf(calls, 'afplay')?.argv).toEqual(['afplay', RECORDING_PATH])
+  expect(spawn?.argv.slice(3)).toEqual(['--dir', MAC_VOICE_DIR, '--detach'])
+  expect(requestsTo(calls, 'speak').length).toBe(2)
+  const band = await mountBand($)
+  expect(await band.find({ type: 'Text', text: SUMMARY })).toBeDefined()
 })
 
-test('sunucu başlatılamazsa ses çalmaz, özet yalnız ekranda kalır', async ($, on) => {
+test('sunucu başlatılamazsa ses çıkmaz, özet yalnız ekranda kalır', async ($, on) => {
   const calls: Call[] = []
   stubHost(on)
   stubSummary(on)
-  stubProcess(on, calls, { curlExitCode: CONNECTION_REFUSED })
+  stubProcess(on, calls, { speakDefault: '000' })
 
   await finishTurn($)
 
   expect(spawnsOf(calls).length).toBe(1)
-  expect(commandsOf(calls)).not.toContain('say')
-  expect(commandsOf(calls)).not.toContain('afplay')
-  expect(calls.filter(call => call.argv[0] === 'rm').length).toBe(1)
+  expect(requestsTo(calls, 'speak').length).toBe(2)
   const band = await mountBand($)
   expect(await band.find({ type: 'Text', text: `Ses üretilemedi, sesli okunmadı. ${SUMMARY}` })).toBeDefined()
   expect(await band.find({ type: 'Button', key: 'close' })).toBeDefined()
 })
 
-test('sunucu hata verirse yeniden başlatılmaz', async ($, on) => {
+test('makine yoğunsa sunucu 503 der, özet yalnız ekranda kalır', async ($, on) => {
   const calls: Call[] = []
   stubHost(on)
   stubSummary(on)
-  stubProcess(on, calls, { curlExitCode: HTTP_ERROR })
+  stubProcess(on, calls, { speakAnswers: ['503'] })
 
   await finishTurn($)
 
   expect(spawnsOf(calls)).toEqual([])
-  expect(commandsOf(calls)).not.toContain('afplay')
-  const band = await mountBand($)
-  expect(await band.find({ type: 'Text', text: `Ses üretilemedi, sesli okunmadı. ${SUMMARY}` })).toBeDefined()
-})
-
-test('ses sunucusuna TCP portundan değil, kullanıcının kendi soketinden gidilir', async ($, on) => {
-  const calls: Call[] = []
-  stubHost(on)
-  stubSummary(on)
-  stubProcess(on, calls)
-
-  await finishTurn($)
-
-  const argv = callOf(calls, 'curl')?.argv ?? []
-  expect(argv[argv.indexOf('--unix-socket') + 1]).toBe(VOICE_SOCKET)
-  expect(argv.some(arg => arg.includes('127.0.0.1'))).toBe(false)
-})
-
-test('makine yoğunken özet yalnız ekranda kalır, ses çıkmaz', async ($, on) => {
-  const calls: Call[] = []
-  stubHost(on)
-  stubSummary(on)
-  stubProcess(on, calls, { loadReport: BUSY_LOAD_REPORT })
-
-  await finishTurn($)
-
-  expect(commandsOf(calls)).toEqual(['sysctl'])
   const band = await mountBand($)
   expect(await band.find({ type: 'Text', text: `Makine yoğun, sesli okunmadı. ${SUMMARY}` })).toBeDefined()
-  expect(await band.find({ type: 'Button', key: 'close' })).toBeDefined()
 })
 
-test('makine sakinken EMA sesi kullanılır', async ($, on) => {
+test('recap olmayan bir cevap sunucu yok sayılır', async ($, on) => {
   const calls: Call[] = []
   stubHost(on)
   stubSummary(on)
-  stubProcess(on, calls, { loadReport: CALM_LOAD_REPORT })
+  stubProcess(on, calls, { speakAnswers: ['404', '200'] })
 
   await finishTurn($)
 
-  expect(commandsOf(calls)).toContain('afplay')
-})
-
-test('yük okunamazsa ses yine çalınır', async ($, on) => {
-  const calls: Call[] = []
-  stubHost(on)
-  stubSummary(on)
-  stubProcess(on, calls, { loadReport: 'beklenmeyen çıktı' })
-
-  await finishTurn($)
-
-  expect(commandsOf(calls)).toContain('afplay')
+  expect(spawnsOf(calls).length).toBe(1)
+  expect(requestsTo(calls, 'speak').length).toBe(2)
 })
 
 test('iptal edilen tur konuşmaz', async ($, on) => {
@@ -252,11 +220,11 @@ test('iptal edilen tur konuşmaz', async ($, on) => {
   expect(calls).toEqual([])
 })
 
-test('Sustur düğmesi konuşmayı keser ve özet ekranda kalır', async ($, on) => {
+test('Sustur düğmesi sunucuya durdurma gönderir ve özet ekranda kalır', async ($, on) => {
   const calls: Call[] = []
   stubHost(on)
   stubSummary(on)
-  stubProcess(on, calls, { slowCommand: 'afplay', slowMs: 400 })
+  stubProcess(on, calls, { slowSpeakMs: 400 })
 
   await finishTurn($)
   const band = await mountBand($)
@@ -264,25 +232,8 @@ test('Sustur düğmesi konuşmayı keser ve özet ekranda kalır', async ($, on)
 
   await band.press({ key: 'stop' })
 
-  const stops = calls.filter(call => call.argv[0] === 'killall')
-  expect(stops.length).toBeGreaterThan(1)
-  expect(stops.at(-1)?.argv).toEqual(['killall', 'afplay'])
+  expect(requestsTo(calls, 'stop').length).toBe(1)
   expect(await band.find({ type: 'Button', key: 'close' })).toBeDefined()
-})
-
-test('ses hazırlanırken Sustur basılırsa çalma hiç başlamaz', async ($, on) => {
-  const calls: Call[] = []
-  stubHost(on)
-  stubSummary(on)
-  stubProcess(on, calls, { slowCommand: 'curl', slowMs: 300 })
-
-  await finishTurn($)
-  const band = await mountBand($)
-  await band.press({ key: 'stop' })
-  await pause(400)
-
-  expect(commandsOf(calls)).not.toContain('afplay')
-  expect(calls.at(-1)?.argv).toEqual(['rm', '-f', RECORDING_PATH])
 })
 
 test('özet hazırlanamazsa bildirim çıkar ve konuşma başlamaz', async ($, on) => {
@@ -303,6 +254,59 @@ test('özet hazırlanamazsa bildirim çıkar ve konuşma başlamaz', async ($, o
   expect(calls).toEqual([])
 })
 
+test('Windows: sunucuya voice.json içindeki port ve jetonla gidilir', async ($, on) => {
+  const calls: Call[] = []
+  stubHost(on, { env: WIN_ENV, files: new Map([[WIN_ENDPOINT_PATH, WIN_ENDPOINT]]) })
+  stubSummary(on)
+  stubProcess(on, calls)
+
+  await finishTurn($)
+
+  const [speak] = requestsTo(calls, 'speak')
+  expect(speak?.argv.at(-1)).toBe('http://127.0.0.1:51234/speak')
+  expect(valueAfter(speak?.argv ?? [], '-H')).toBe('Content-Type: application/json')
+  expect(speak?.argv).toContain('X-Recap-Token: jeton')
+  expect(speak?.argv).not.toContain('--unix-socket')
+  expect(spawnsOf(calls)).toEqual([])
+})
+
+test('Windows: voice.json yoksa sunucu USERPROFILE altındaki Python ile başlatılır', async ($, on) => {
+  const calls: Call[] = []
+  const files = stubHost(on, { env: WIN_ENV })
+  stubSummary(on)
+  stubProcess(on, calls, { onSpawn: () => files.set(WIN_ENDPOINT_PATH, WIN_ENDPOINT) })
+
+  await finishTurn($)
+
+  expect(spawnsOf(calls)[0]?.argv.slice(3)).toEqual(['--dir', WIN_VOICE_DIR, '--detach'])
+  expect(requestsTo(calls, 'speak').length).toBe(1)
+  expect(requestsTo(calls, 'speak')[0]?.argv.at(-1)).toBe('http://127.0.0.1:51234/speak')
+})
+
+test('Windows: kanıtı tutmayan cevap başka bir programdır, sunucu yeniden başlatılır', async ($, on) => {
+  const calls: Call[] = []
+  stubHost(on, { env: WIN_ENV, files: new Map([[WIN_ENDPOINT_PATH, WIN_ENDPOINT]]) })
+  stubSummary(on)
+  stubProcess(on, calls, { proof: 'baska-bir-program' })
+
+  await finishTurn($)
+
+  expect(spawnsOf(calls).length).toBe(1)
+  const band = await mountBand($)
+  expect(await band.find({ type: 'Text', text: `Ses üretilemedi, sesli okunmadı. ${SUMMARY}` })).toBeDefined()
+})
+
+test('Windows: genel durum dosyası HOME değil USERPROFILE altında tutulur', async ($, on) => {
+  const calls: Call[] = []
+  const files = stubHost(on, { env: WIN_ENV })
+  stubProcess(on, calls)
+
+  await $.command.run({ command: 'recap', args: 'hepsi off' })
+
+  expect(JSON.parse(files.get(WIN_STATE_PATH) ?? '{}').mode).toBe('off')
+  expect([...files.keys()].some(path => path.startsWith('/shared'))).toBe(false)
+})
+
 const USAGE_LINE =
   'Değiştirmek için: /recap on, /recap mute ya da /recap off. Sonuna "hepsi" eklerseniz tüm oturumlar değişir.'
 
@@ -315,15 +319,16 @@ test('/recap boş çağrı yalnız durumu gösterir, hiçbir şeyi değiştirmez
   const first = await $.command.run({ command: 'recap', args: '' })
   expect(first.text).toBe(`Tüm oturumlar on — özet sesli okunur.\n${USAGE_LINE}`)
   expect((await $.command.run({ command: 'recap', args: '' })).text).toBe(first.text)
+  expect(calls).toEqual([])
 
   await finishTurn($)
-  expect(commandsOf(calls)).toContain('afplay')
+  expect(requestsTo(calls, 'speak').length).toBe(1)
 })
 
 test('/recap mute bu oturumun sesini kapatır, özet yine ekranda görünür', async ($, on) => {
   const calls: Call[] = []
   const statuses: unknown[] = []
-  const files = stubHost(on, new Map(), statuses)
+  const files = stubHost(on, { statuses })
   stubSummary(on)
   stubProcess(on, calls)
 
@@ -334,7 +339,7 @@ test('/recap mute bu oturumun sesini kapatır, özet yine ekranda görünür', a
   expect(statuses.at(-1)).toBe('recap: mute')
   await finishTurn($)
 
-  expect(commandsOf(calls)).toEqual(['killall'])
+  expect(requestsTo(calls, 'speak')).toEqual([])
   expect(files.size).toBe(0)
   const band = await mountBand($)
   expect(await band.find({ type: 'Text', text: SUMMARY })).toBeDefined()
@@ -353,7 +358,7 @@ test('aynı durumu yeniden seçmek "zaten" der', async ($, on) => {
   )
 })
 
-test('/recap off bu oturumda özeti kapatır, /recap on geri açar', async ($, on) => {
+test('/recap off bu oturumda özeti kapatır, /recap on geri açar ve sunucuyu ısıtır', async ($, on) => {
   const calls: Call[] = []
   let summaries = 0
   const files = stubHost(on)
@@ -367,39 +372,37 @@ test('/recap off bu oturumda özeti kapatır, /recap on geri açar', async ($, o
   await $.command.run({ command: 'recap', args: 'kapat' })
   await finishTurn($)
   expect(summaries).toBe(0)
-  expect(commandsOf(calls)).toEqual(['killall'])
+  expect(calls).toEqual([])
   expect(files.size).toBe(0)
-
-  expect(shutdownsOf(calls)).toEqual([])
 
   const reply = await $.command.run({ command: 'recap', args: 'aç' })
   expect(reply.text).toBe('Bu oturum artık on — özet sesli okunur.')
   expect(spawnsOf(calls).length).toBe(1)
   await finishTurn($)
   expect(summaries).toBe(1)
-  expect(commandsOf(calls)).toContain('afplay')
+  expect(requestsTo(calls, 'speak').length).toBe(1)
 })
 
-test('son verilen komut geçerlidir: hepsi off, sonra bu oturumda on', async ($, on) => {
+test('son verilen komut geçerlidir: hepsi off sunucuyu kapatır, sonra bu oturumda on', async ($, on) => {
   const calls: Call[] = []
   const statuses: unknown[] = []
-  const files = stubHost(on, new Map(), statuses)
+  const files = stubHost(on, { statuses })
   stubSummary(on)
   stubProcess(on, calls)
 
   const all = await $.command.run({ command: 'recap', args: 'hepsini kapat' })
   expect(all.text).toBe('Tüm oturumlar artık off — özet yok.')
-  expect(JSON.parse(files.get(STATE_PATH) ?? '{}').mode).toBe('off')
+  expect(JSON.parse(files.get(MAC_STATE_PATH) ?? '{}').mode).toBe('off')
   expect(statuses.at(-1)).toBe('recap: off')
-  expect(shutdownsOf(calls).length).toBe(1)
+  expect(requestsTo(calls, 'shutdown').length).toBe(1)
   await finishTurn($)
-  expect(commandsOf(calls)).not.toContain('afplay')
+  expect(requestsTo(calls, 'speak')).toEqual([])
 
   const here = await $.command.run({ command: 'recap', args: 'aç' })
   expect(here.text).toBe('Bu oturum artık on — özet sesli okunur.\nDiğer oturumlar off — özet yok.')
   expect(statuses.at(-1)).toBeUndefined()
   await finishTurn($)
-  expect(commandsOf(calls)).toContain('afplay')
+  expect(requestsTo(calls, 'speak').length).toBe(1)
 
   const again = await $.command.run({ command: 'recap', args: 'hepsi off' })
   expect(again.text).toBe('Tüm oturumlar artık off — özet yok.')
@@ -408,7 +411,7 @@ test('son verilen komut geçerlidir: hepsi off, sonra bu oturumda on', async ($,
   )
 })
 
-test('/recap heryerde sessiz tüm oturumlarda sesi kapatır, özet kalır', async ($, on) => {
+test('/recap heryerde sessiz tüm oturumlarda sesi kapatır, sunucuyu kapatır, özet kalır', async ($, on) => {
   const calls: Call[] = []
   const files = stubHost(on)
   stubSummary(on)
@@ -416,18 +419,18 @@ test('/recap heryerde sessiz tüm oturumlarda sesi kapatır, özet kalır', asyn
 
   const reply = await $.command.run({ command: 'recap', args: 'heryerde sessiz' })
   expect(reply.text).toBe('Tüm oturumlar artık mute — özet yazılır, ses yok.')
-  expect(JSON.parse(files.get(STATE_PATH) ?? '{}').mode).toBe('mute')
+  expect(JSON.parse(files.get(MAC_STATE_PATH) ?? '{}').mode).toBe('mute')
   await finishTurn($)
 
-  expect(commandsOf(calls)).toEqual(['killall', 'curl'])
-  expect(shutdownsOf(calls).length).toBe(1)
+  expect(requestsTo(calls, 'shutdown').length).toBe(1)
+  expect(requestsTo(calls, 'speak')).toEqual([])
   const band = await mountBand($)
   expect(await band.find({ type: 'Text', text: SUMMARY })).toBeDefined()
 })
 
 test('başka terminalin yazdığı genel ayar bu oturumda da geçerlidir', async ($, on) => {
   const calls: Call[] = []
-  stubHost(on, new Map([[STATE_PATH, '{"mode":"off"}']]))
+  stubHost(on, { files: new Map([[MAC_STATE_PATH, '{"mode":"off"}']]) })
   stubSummary(on)
   stubProcess(on, calls)
 
@@ -446,19 +449,19 @@ test('başka terminalden sonra gelen genel ayar bu oturumun eski seçimini geçe
   stubProcess(on, calls)
 
   await $.command.run({ command: 'recap', args: 'mute' })
-  files.set(STATE_PATH, JSON.stringify({ mode: 'on', at: Date.now() + 60_000 }))
+  files.set(MAC_STATE_PATH, JSON.stringify({ mode: 'on', at: Date.now() + 60_000 }))
   await finishTurn($)
 
-  expect(commandsOf(calls)).toContain('afplay')
+  expect(requestsTo(calls, 'speak').length).toBe(1)
 })
 
 test('bozuk durum dosyası sesli özeti engellemez', async ($, on) => {
   const calls: Call[] = []
-  stubHost(on, new Map([[STATE_PATH, '{"isMutedForAll":true}']]))
+  stubHost(on, { files: new Map([[MAC_STATE_PATH, '{"isMutedForAll":true}']]) })
   stubSummary(on)
   stubProcess(on, calls)
 
   await finishTurn($)
 
-  expect(commandsOf(calls)).toContain('afplay')
+  expect(requestsTo(calls, 'speak').length).toBe(1)
 })
