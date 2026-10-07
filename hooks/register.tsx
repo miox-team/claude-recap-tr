@@ -6,7 +6,7 @@ import type { ModeChoice, Narration, NarrationPhase, RecapMode } from '../types'
 type Scope = 'all' | 'here'
 type Action = RecapMode | 'status'
 type Modes = { all: RecapMode; here: RecapMode }
-type VoicePath = 'speak' | 'stop' | 'shutdown'
+type VoicePath = 'hello' | 'speak' | 'stop' | 'shutdown'
 type VoiceEndpoint = { target: readonly string[]; base: string; proof?: string }
 
 const SUMMARY_MODEL = 'claude-sonnet-5-5'
@@ -140,7 +140,7 @@ const askVoice = async ($: EngineInterface, endpoint: VoiceEndpoint, path: Voice
   return isRecap ? code : null
 }
 
-const tellVoice = async ($: EngineInterface, path: Exclude<VoicePath, 'speak'>) => {
+const tellVoice = async ($: EngineInterface, path: 'stop' | 'shutdown') => {
   const endpoint = await readVoiceEndpoint($)
   if (endpoint !== null) await askVoice($, endpoint, path)
 }
@@ -161,7 +161,10 @@ const speakAloud = async ($: EngineInterface, text: string): Promise<NarrationPh
   const body = JSON.stringify({ text })
   const ask = async () => {
     const endpoint = await readVoiceEndpoint($)
-    return endpoint === null ? null : askVoice($, endpoint, 'speak', body)
+    if (endpoint === null) return null
+    const mustProveItself = endpoint.proof !== undefined
+    if (mustProveItself && (await askVoice($, endpoint, 'hello')) !== '200') return null
+    return askVoice($, endpoint, 'speak', body)
   }
   let answer = await ask()
   if (answer === null) {

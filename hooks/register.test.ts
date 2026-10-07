@@ -283,7 +283,7 @@ test('Windows: voice.json yoksa sunucu USERPROFILE altındaki Python ile başlat
   expect(requestsTo(calls, 'speak')[0]?.argv.at(-1)).toBe('http://127.0.0.1:51234/speak')
 })
 
-test('Windows: kanıtı tutmayan cevap başka bir programdır, sunucu yeniden başlatılır', async ($, on) => {
+test('Windows: özet, sunucu kendini kanıtlamadan gönderilmez', async ($, on) => {
   const calls: Call[] = []
   stubHost(on, { env: WIN_ENV, files: new Map([[WIN_ENDPOINT_PATH, WIN_ENDPOINT]]) })
   stubSummary(on)
@@ -291,9 +291,28 @@ test('Windows: kanıtı tutmayan cevap başka bir programdır, sunucu yeniden ba
 
   await finishTurn($)
 
+  expect(requestsTo(calls, 'hello').length).toBe(2)
+  expect(requestsTo(calls, 'speak')).toEqual([])
+  expect(calls.some(call => call.stdin?.includes(SUMMARY))).toBe(false)
   expect(spawnsOf(calls).length).toBe(1)
   const band = await mountBand($)
   expect(await band.find({ type: 'Text', text: `Ses üretilemedi, sesli okunmadı. ${SUMMARY}` })).toBeDefined()
+})
+
+test('Windows: kendini kanıtlayan sunucuya özet gönderilir', async ($, on) => {
+  const calls: Call[] = []
+  stubHost(on, { env: WIN_ENV, files: new Map([[WIN_ENDPOINT_PATH, WIN_ENDPOINT]]) })
+  stubSummary(on)
+  stubProcess(on, calls)
+
+  await finishTurn($)
+
+  const [hello] = requestsTo(calls, 'hello')
+  expect(hello?.stdin).toBeUndefined()
+  expect(hello?.argv).toContain('X-Recap-Token: jeton')
+  expect(calls.findIndex(call => endpointOf(call.argv) === 'hello')).toBeLessThan(
+    calls.findIndex(call => endpointOf(call.argv) === 'speak'),
+  )
 })
 
 test('Windows: genel durum dosyası HOME değil USERPROFILE altında tutulur', async ($, on) => {

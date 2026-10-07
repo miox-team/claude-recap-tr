@@ -45,6 +45,8 @@ def venv_python() -> Path:
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="recap için yerel Türkçe sesi (EMA Lightning) kurar.")
     parser.add_argument("--no-sound", action="store_true", help="sonunda deneme cümlesini çalma")
     args = parser.parse_args()

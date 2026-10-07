@@ -33,7 +33,7 @@ class Harness:
         self.silent = silent
 
     def server_argv(self, server: Path = SERVER) -> list:
-        argv = [self.python, "-I", str(server), "--dir", self.folder]
+        argv = [self.python, "-I", str(server), "--dir", self.folder, "--ignore-load"]
         if self.use_tcp and not IS_WINDOWS:
             argv.append("--tcp")
         if self.silent:
@@ -100,6 +100,10 @@ def run_checks(h: Harness):
     report("speak right after --detach returns", code == "200" and bool(proof) and proof == expected_proof, code)
 
     if h.use_tcp:
+        code, body = h.request("hello")
+        report("hello answers with the proof", code == "200" and body == expected_proof, code)
+        code, body = h.request("hello", token="")
+        report("hello without token reveals nothing", code == "403" and body == "", code)
         code, body = h.request("speak", "Bir.", token="")
         report("no token is refused without proof", code == "403" and body == "", code)
         code, body = h.request("speak", "Bir.", token="0" * 64)

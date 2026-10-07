@@ -193,8 +193,9 @@ def is_busy() -> bool:
 
 
 class Voice:
-    def __init__(self, player, token, idle_exit_seconds: float):
+    def __init__(self, player, token, idle_exit_seconds: float, ignore_load: bool):
         self.player = player
+        self.ignore_load = ignore_load
         self.token = token
         self.proof = secrets.token_hex(32)
         self.idle_exit_seconds = idle_exit_seconds
@@ -214,6 +215,8 @@ class VoiceHandler(BaseHTTPRequestHandler):
         voice.last_used = time.monotonic()
         if not voice.is_authorized(self.headers.get(TOKEN_HEADER)):
             return self.answer(403, with_proof=False)
+        if self.path == "/hello":
+            return self.answer(200)
         if self.path == "/shutdown":
             self.answer(200)
             return threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -225,7 +228,7 @@ class VoiceHandler(BaseHTTPRequestHandler):
         text = self.read_text()
         if text is None:
             return self.answer(400)
-        if is_busy():
+        if not voice.ignore_load and is_busy():
             return self.answer(503)
         with voice.synthesis:
             speech = voice.tts.say(text, speed=SPEED)
@@ -255,8 +258,10 @@ class VoiceHandler(BaseHTTPRequestHandler):
         pass
 
 
-class UnixVoiceServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    daemon_threads = True
+if hasattr(socketserver, "UnixStreamServer"):
+
+    class UnixVoiceServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+        daemon_threads = True
 
 
 class TcpVoiceServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
@@ -338,7 +343,7 @@ def bind(folder: str, use_tcp: bool):
     return server
 
 
-def serve(folder: str, idle_exit_seconds: float, use_tcp: bool, silent: bool):
+def serve(folder: str, idle_exit_seconds: float, use_tcp: bool, silent: bool, ignore_load: bool):
     try:
         private_folder(folder)
     except UnsafeFolder as error:
@@ -350,7 +355,7 @@ def serve(folder: str, idle_exit_seconds: float, use_tcp: bool, silent: bool):
         server = bind(folder, use_tcp)
     except OSError as error:
         sys.exit(f"recap voice: cannot listen in {folder} ({error})")
-    voice = Voice(player_for(silent), secrets.token_hex(32) if use_tcp else None, idle_exit_seconds)
+    voice = Voice(player_for(silent), secrets.token_hex(32) if use_tcp else None, idle_exit_seconds, ignore_load)
     server.voice = voice
     try:
         if use_tcp:
@@ -375,13 +380,15 @@ def stop_when_idle(server, voice: Voice):
             return
 
 
-def start_detached(folder: str, idle_exit_seconds: float, use_tcp: bool, silent: bool):
+def start_detached(folder: str, idle_exit_seconds: float, use_tcp: bool, silent: bool, ignore_load: bool):
     argv = [sys.executable, "-I", os.path.abspath(__file__), "--dir", folder]
     argv += ["--idle-exit-seconds", str(idle_exit_seconds)]
     if use_tcp and not IS_WINDOWS:
         argv.append("--tcp")
     if silent:
         argv.append("--silent")
+    if ignore_load:
+        argv.append("--ignore-load")
     if IS_WINDOWS:
         detach = {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
     else:
@@ -416,6 +423,7 @@ def main():
     parser.add_argument("--detach", action="store_true", help="start in the background, return once it accepts")
     parser.add_argument("--tcp", action="store_true", help="use loopback TCP with a token (always on Windows)")
     parser.add_argument("--silent", action="store_true", help="synthesize but do not play (tests and CI)")
+    parser.add_argument("--ignore-load", action="store_true", help="speak even on a busy machine (tests and CI)")
     parser.add_argument("--check", action="store_true", help="download and check the model, then say a test sentence")
     parser.add_argument("--no-sound", action="store_true", help="with --check: do not play the test sentence")
     args = parser.parse_args()
@@ -425,9 +433,9 @@ def main():
     elif args.dir is None:
         parser.error("--dir is required")
     elif args.detach:
-        start_detached(args.dir, args.idle_exit_seconds, use_tcp, args.silent)
+        start_detached(args.dir, args.idle_exit_seconds, use_tcp, args.silent, args.ignore_load)
     else:
-        serve(args.dir, args.idle_exit_seconds, use_tcp, args.silent)
+        serve(args.dir, args.idle_exit_seconds, use_tcp, args.silent, args.ignore_load)
 
 
 if __name__ == "__main__":
