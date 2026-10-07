@@ -1,7 +1,7 @@
 {
   "name": "recap",
-  "version": "0.5.0",
-  "description": "Claude cevabını bitirince ne yaptığını kısa bir Türkçe özetle anlatır: tamamen yerel EMA sesiyle, yalnız yazıyla ya da hiç.",
+  "version": "0.6.0",
+  "description": "Claude cevabını bitirince ne yaptığını kısa bir Türkçe özetle anlatır: tamamen yerel EMA sesiyle, yalnız yazıyla ya da hiç. macOS ve Windows.",
   "author": {
     "name": "miox-team",
     "url": "https://github.com/miox-team"

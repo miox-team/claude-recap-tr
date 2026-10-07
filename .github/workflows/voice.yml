@@ -18,3 +18,10 @@ jobs:
         run: uv run --no-project --python 3.12 scripts/install_voice.py --no-sound
       - name: Check the voice server end to end
         run: uv run --no-project --python 3.12 scripts/check_voice_server.py --silent
+      - name: Play the test sentence through winsound (runners have no audio device)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: |
+          & "$HOME\.local\share\recap-ema\Scripts\python.exe" -I tts\ema_server.py --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output "winsound playback returned without error"
